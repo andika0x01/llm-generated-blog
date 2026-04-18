@@ -157,6 +157,17 @@ function parseBooleanEnv(value?: string): boolean | undefined {
 	return undefined;
 }
 
+function getMissingGenerationEnv(env: WorkerEnv): string[] {
+	const missing: string[] = [];
+	if (!env.GOOGLE_API_KEY?.trim()) {
+		missing.push("GOOGLE_API_KEY");
+	}
+	if (!env.GOOGLE_MODEL_NAME?.trim()) {
+		missing.push("GOOGLE_MODEL_NAME");
+	}
+	return missing;
+}
+
 function resolveRuntimeConfig(env: WorkerEnv): RuntimeConfig {
 	const defaults = FREE_PROFILE_DEFAULTS;
 
@@ -824,10 +835,29 @@ export class BlogGenerationOrchestrator extends DurableObject<Env> {
 		try {
 			nextJob = await this.processQueuedJob(job);
 		} catch (error) {
-			console.error("[orchestrator] queued run failed", error);
-			if (job.step !== "start") {
-				await finalizeRun(this.env.D1, job.runId, "failed", job.attempt, Date.now(), {
-					errorMessage: error instanceof Error ? error.message : "Unhandled queue processing error",
+			const errorMessage =
+				error instanceof Error ? error.message : "Unhandled queue processing error";
+			console.error("[orchestrator] queued run failed", {
+				runId: job.runId,
+				step: job.step,
+				attempt: job.attempt,
+				errorMessage,
+			});
+			try {
+				nextJob = await this.handleQueuedAttemptFailure(
+					job,
+					errorMessage,
+					resolveRuntimeConfig(this.env),
+				);
+			} catch (finalizeError) {
+				console.error("[orchestrator] failed to handle queued run failure", {
+					runId: job.runId,
+					step: job.step,
+					attempt: job.attempt,
+					finalizeError:
+						finalizeError instanceof Error
+							? finalizeError.message
+							: "Unknown finalization error",
 				});
 			}
 		}
@@ -903,11 +933,25 @@ export class BlogGenerationOrchestrator extends DurableObject<Env> {
 	): Promise<QueuedJob | null> {
 		const nextAttempt = job.attempt + 1;
 		if (nextAttempt > config.maxGenerationAttempts) {
+			console.warn("[orchestrator] queued run exhausted retries", {
+				runId: job.runId,
+				step: job.step,
+				attempt: job.attempt,
+				errorMessage,
+			});
 			await finalizeRun(this.env.D1, job.runId, "failed", job.attempt, Date.now(), {
 				errorMessage,
 			});
 			return null;
 		}
+
+		console.warn("[orchestrator] queued run will retry", {
+			runId: job.runId,
+			step: job.step,
+			attempt: job.attempt,
+			nextAttempt,
+			errorMessage,
+		});
 
 		const { generated: _generated, draft: _draft, ...jobWithoutPayload } = job;
 
@@ -1128,6 +1172,17 @@ const worker: ExportedHandler<WorkerEnv> = {
 				}
 			}
 
+			const missingGenerationEnv = getMissingGenerationEnv(env);
+			if (missingGenerationEnv.length > 0) {
+				return responseJson(
+					{
+						error: "Missing required generation environment variables",
+						missing: missingGenerationEnv,
+					},
+					500,
+				);
+			}
+
 			const config = resolveRuntimeConfig(env);
 			const waitQuery = parseBooleanEnv(url.searchParams.get("wait") ?? undefined);
 			const shouldWaitForResult = waitQuery ?? config.manualGenerateWait;
@@ -1181,13 +1236,23 @@ const worker: ExportedHandler<WorkerEnv> = {
 	async scheduled(controller, env, ctx) {
 		ctx.waitUntil(
 			(async () => {
+				const missingGenerationEnv = getMissingGenerationEnv(env);
+				if (missingGenerationEnv.length > 0) {
+					console.error("[scheduled][enqueue] skipped due to missing env", {
+						missing: missingGenerationEnv,
+						scheduledTime: controller.scheduledTime,
+						cron: controller.cron,
+					});
+					return;
+				}
+
 				const response = await enqueueOrchestrator(env, {
 					scheduledTime: controller.scheduledTime,
 					cron: controller.cron,
 					source: "scheduled",
 				});
 				const body = await response.text();
-				console.log(body);
+				console.log(`[scheduled][enqueue] status=${response.status} body=${body}`);
 			})(),
 		);
 	},
