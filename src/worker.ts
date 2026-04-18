@@ -4,16 +4,23 @@ import { GoogleGenAI } from "@google/genai";
 import systemInstructionsRaw from "@/system-instructions.md?raw";
 
 const WIB_OFFSET_HOURS = 7;
-const MAX_GENERATION_ATTEMPTS = 5;
-const RECENT_TITLE_WINDOW = 12;
-const RECENT_CONTENT_WINDOW = 50;
-const NEAR_DUPLICATE_THRESHOLD = 0.84;
+const NEAR_DUPLICATE_THRESHOLD = 0.78;
+const TITLE_SIMILARITY_THRESHOLD = 0.72;
+const LEAD_SIMILARITY_THRESHOLD = 0.82;
+const LEAD_WORD_WINDOW = 120;
 const MAX_TITLE_LENGTH = 60;
 const MAX_DESCRIPTION_LENGTH = 180;
-const MIN_ARTICLE_WORDS = 1500;
-const MAX_ARTICLE_WORDS = 2000;
-const TARGET_ARTICLE_WORDS = 1700;
-const MAX_CONTINUATION_ATTEMPTS = 3;
+
+const FREE_PROFILE_DEFAULTS = {
+	maxGenerationAttempts: 2,
+	recentTitleWindow: 10,
+	recentContentWindow: 36,
+	minArticleWords: 700,
+	maxArticleWords: 1000,
+	targetArticleWords: 850,
+	maxContinuationAttempts: 1,
+	manualGenerateWait: false,
+};
 const LOCAL_DEV_HOSTS = new Set(["localhost", "127.0.0.1", "0.0.0.0", "::1"]);
 
 let hasAttemptedDevStartupGeneration = false;
@@ -28,6 +35,7 @@ interface WorkerEnv {
 	GOOGLE_MODEL_NAME: string;
 	CRON_SECRET?: string;
 	AUTO_GENERATE_ON_DEV_START: string;
+	MANUAL_GENERATE_WAIT?: string;
 }
 
 interface RunRequest {
@@ -98,6 +106,34 @@ interface RunResult {
 	attempt?: number;
 }
 
+interface RuntimeConfig {
+	maxGenerationAttempts: number;
+	recentTitleWindow: number;
+	recentContentWindow: number;
+	nearDuplicateThreshold: number;
+	maxTitleLength: number;
+	maxDescriptionLength: number;
+	minArticleWords: number;
+	maxArticleWords: number;
+	targetArticleWords: number;
+	maxContinuationAttempts: number;
+	manualGenerateWait: boolean;
+}
+
+type QueuedJobStep = "start" | "generate" | "prepare" | "persist";
+
+interface QueuedJob {
+	version: 1;
+	step: QueuedJobStep;
+	request: RunRequest;
+	runId: string;
+	dateKey: string;
+	attempt: number;
+	lastError?: string;
+	generated?: GeneratedPayload;
+	draft?: PreparedPost;
+}
+
 function responseJson(data: unknown, status = 200): Response {
 	return new Response(JSON.stringify(data, null, 2), {
 		headers: {
@@ -121,8 +157,29 @@ function parseBooleanEnv(value?: string): boolean | undefined {
 	return undefined;
 }
 
+function resolveRuntimeConfig(env: WorkerEnv): RuntimeConfig {
+	const defaults = FREE_PROFILE_DEFAULTS;
+
+	return {
+		maxGenerationAttempts: defaults.maxGenerationAttempts,
+		recentTitleWindow: defaults.recentTitleWindow,
+		recentContentWindow: defaults.recentContentWindow,
+		nearDuplicateThreshold: NEAR_DUPLICATE_THRESHOLD,
+		maxTitleLength: MAX_TITLE_LENGTH,
+		maxDescriptionLength: MAX_DESCRIPTION_LENGTH,
+		minArticleWords: defaults.minArticleWords,
+		maxArticleWords: defaults.maxArticleWords,
+		targetArticleWords: defaults.targetArticleWords,
+		maxContinuationAttempts: defaults.maxContinuationAttempts,
+		manualGenerateWait: parseBooleanEnv(env.MANUAL_GENERATE_WAIT) ?? defaults.manualGenerateWait,
+	};
+}
+
 function shouldAttemptDevStartupGeneration(url: URL, env: WorkerEnv): boolean {
 	if (hasAttemptedDevStartupGeneration || isAttemptingDevStartupGeneration) {
+		return false;
+	}
+	if (url.pathname.startsWith("/api/internal/")) {
 		return false;
 	}
 	if (!LOCAL_DEV_HOSTS.has(url.hostname)) {
@@ -176,6 +233,18 @@ function normalizeTitle(input: string): string {
 		.replace(/[^a-z0-9\s-]/g, " ")
 		.replace(/\s+/g, " ")
 		.trim();
+}
+
+function titleTokenSet(input: string): Set<string> {
+	return new Set(normalizeTitle(input).split(" ").filter(Boolean));
+}
+
+function leadingWords(input: string, wordLimit: number): string {
+	return input
+		.split(" ")
+		.filter(Boolean)
+		.slice(0, wordLimit)
+		.join(" ");
 }
 
 function toSlug(input: string): string {
@@ -320,9 +389,9 @@ async function hasExactHash(db: D1Database, contentHash: string): Promise<boolea
 	return !!row;
 }
 
-function buildInlineInstructions(recentRows: RecentTitleRow[]): string {
+function buildInlineInstructions(recentRows: RecentTitleRow[], config: RuntimeConfig): string {
 	const recent = recentRows
-		.slice(0, RECENT_TITLE_WINDOW)
+		.slice(0, config.recentTitleWindow)
 		.map((row, idx) => `${idx + 1}. ${row.title} :: ${row.description}`)
 		.join("\n");
 
@@ -336,13 +405,15 @@ function buildInlineInstructions(recentRows: RecentTitleRow[]): string {
 		"- description must be <= 180 characters.",
 		"- tags must contain 2 to 5 short lowercase topic tags.",
 		"- Choose one primary topic area: competitive programming, web development, cyber security, or AI/ML.",
-		`- mdxBody must be between ${MIN_ARTICLE_WORDS} and ${MAX_ARTICLE_WORDS} words, target around ${TARGET_ARTICLE_WORDS} words.`,
+		`- mdxBody must be between ${config.minArticleWords} and ${config.maxArticleWords} words, target around ${config.targetArticleWords} words.`,
 		"- mdxBody must be valid Astro-compatible MDX body without frontmatter.",
 		"- Do not include a leading or trailing code fence around the full response.",
 		"- Use markdown headings, lists, tables, code fences as needed.",
 		"- Ensure depth: problem framing, technical explanation, examples, pitfalls, and practical takeaways.",
 		"- Admonition directives are allowed only with these types: tip, note, important, caution, warning.",
 		"- Never repeat title, structure, and thesis from previous posts.",
+		"- Avoid reusing the same key noun phrases from recent titles.",
+		"- Ensure the opening section presents a clearly different angle from recent posts.",
 		"- Avoid references to this instruction text.",
 		"Previously published topics to avoid duplicating:",
 		recent || "(none)",
@@ -354,13 +425,18 @@ async function continueArticleToTargetLength(
 	env: WorkerEnv,
 	systemInstructions: string,
 	payload: GeneratedPayload,
+	config: RuntimeConfig,
 ): Promise<GeneratedPayload> {
 	let mdxBody = payload.mdxBody.trim();
 	let words = countWords(mdxBody);
 
-	for (let attempt = 1; attempt <= MAX_CONTINUATION_ATTEMPTS && words < MIN_ARTICLE_WORDS; attempt++) {
-		const remaining = MIN_ARTICLE_WORDS - words;
-		const allowedExtra = MAX_ARTICLE_WORDS - words;
+	for (
+		let attempt = 1;
+		attempt <= config.maxContinuationAttempts && words < config.minArticleWords;
+		attempt++
+	) {
+		const remaining = config.minArticleWords - words;
+		const allowedExtra = config.maxArticleWords - words;
 		if (allowedExtra <= 0) {
 			break;
 		}
@@ -371,7 +447,7 @@ async function continueArticleToTargetLength(
 		const continuationPrompt = [
 			"Lanjutkan artikel berikut tanpa mengulang bagian yang sudah ada.",
 			"Wajib Bahasa Indonesia.",
-			`Tambahkan sekitar ${minChunk}-${maxChunk} kata agar total artikel mencapai ${MIN_ARTICLE_WORDS}-${MAX_ARTICLE_WORDS} kata.`,
+			`Tambahkan sekitar ${minChunk}-${maxChunk} kata agar total artikel mencapai ${config.minArticleWords}-${config.maxArticleWords} kata.`,
 			"Pertahankan kualitas teknis, alur logis, dan konsistensi gaya.",
 			"Kembalikan JSON valid dengan shape tepat:",
 			'{"additionalMdxBody": string}',
@@ -418,6 +494,7 @@ async function continueArticleToTargetLength(
 async function generateArticleWithGemini(
 	env: WorkerEnv,
 	recentRows: RecentTitleRow[],
+	config: RuntimeConfig,
 ): Promise<GeneratedPayload> {
 	if (!env.GOOGLE_API_KEY?.trim()) {
 		throw new Error("Missing GOOGLE_API_KEY");
@@ -430,7 +507,7 @@ async function generateArticleWithGemini(
 		throw new Error("System instructions are empty or too short");
 	}
 
-	const inlineInstructions = buildInlineInstructions(recentRows);
+	const inlineInstructions = buildInlineInstructions(recentRows, config);
 	const ai = new GoogleGenAI({ apiKey: env.GOOGLE_API_KEY });
 
 	const response = await ai.models.generateContent({
@@ -462,6 +539,7 @@ async function generateArticleWithGemini(
 		env,
 		systemInstructions,
 		generatedPayload,
+		config,
 	);
 
 	return {
@@ -493,6 +571,7 @@ async function preparePostDraft(
 	payload: GeneratedPayload,
 	modelName: string,
 	now: number,
+	config: RuntimeConfig,
 ): Promise<PreparedPost> {
 	const title = payload.title.trim().replace(/\s+/g, " ");
 	const description = payload.description.trim().replace(/\s+/g, " ");
@@ -501,19 +580,19 @@ async function preparePostDraft(
 	if (!title) {
 		throw new Error("Generated title is empty");
 	}
-	if (title.length > MAX_TITLE_LENGTH) {
-		throw new Error(`Generated title exceeds ${MAX_TITLE_LENGTH} characters`);
+	if (title.length > config.maxTitleLength) {
+		throw new Error(`Generated title exceeds ${config.maxTitleLength} characters`);
 	}
 	if (!description) {
 		throw new Error("Generated description is empty");
 	}
-	if (description.length > MAX_DESCRIPTION_LENGTH) {
-		throw new Error(`Generated description exceeds ${MAX_DESCRIPTION_LENGTH} characters`);
+	if (description.length > config.maxDescriptionLength) {
+		throw new Error(`Generated description exceeds ${config.maxDescriptionLength} characters`);
 	}
 	const wordCount = countWords(mdxBody);
-	if (wordCount < MIN_ARTICLE_WORDS || wordCount > MAX_ARTICLE_WORDS) {
+	if (wordCount < config.minArticleWords || wordCount > config.maxArticleWords) {
 		throw new Error(
-			`Generated article word count out of range (${wordCount}). Expected ${MIN_ARTICLE_WORDS}-${MAX_ARTICLE_WORDS}.`,
+			`Generated article word count out of range (${wordCount}). Expected ${config.minArticleWords}-${config.maxArticleWords}.`,
 		);
 	}
 
@@ -548,25 +627,57 @@ async function preparePostDraft(
 	};
 }
 
-async function checkDuplicate(db: D1Database, draft: PreparedPost): Promise<DuplicateCheckResult> {
-	if (await hasExactTitle(db, draft.normalizedTitle)) {
+async function checkDuplicate(
+	db: D1Database,
+	draft: PreparedPost,
+	config: RuntimeConfig,
+): Promise<DuplicateCheckResult> {
+	const [exactTitleDuplicate, exactHashDuplicate] = await Promise.all([
+		hasExactTitle(db, draft.normalizedTitle),
+		hasExactHash(db, draft.contentHash),
+	]);
+
+	if (exactTitleDuplicate) {
 		return {
 			isDuplicate: true,
 			reason: "exact title duplicate",
 		};
 	}
-	if (await hasExactHash(db, draft.contentHash)) {
+	if (exactHashDuplicate) {
 		return {
 			isDuplicate: true,
 			reason: "exact content duplicate",
 		};
 	}
 
-	const recentRows = await getRecentCanonical(db, RECENT_CONTENT_WINDOW);
+	const recentRows = await getRecentCanonical(db, config.recentContentWindow);
+	const candidateTitleTokens = titleTokenSet(draft.title);
 	const candidateShingles = buildShingles(draft.canonicalContent);
+	const candidateLeadShingles = buildShingles(leadingWords(draft.canonicalContent, LEAD_WORD_WINDOW), 3);
 	for (const row of recentRows) {
+		const titleSimilarity = jaccardSimilarity(candidateTitleTokens, titleTokenSet(row.title));
+		if (titleSimilarity >= TITLE_SIMILARITY_THRESHOLD) {
+			return {
+				isDuplicate: true,
+				reason: `title too similar to "${row.title}"`,
+				similarity: titleSimilarity,
+			};
+		}
+
+		const leadSimilarity = jaccardSimilarity(
+			candidateLeadShingles,
+			buildShingles(leadingWords(row.canonical_content, LEAD_WORD_WINDOW), 3),
+		);
+		if (leadSimilarity >= LEAD_SIMILARITY_THRESHOLD) {
+			return {
+				isDuplicate: true,
+				reason: `opening section too similar to "${row.title}"`,
+				similarity: leadSimilarity,
+			};
+		}
+
 		const similarity = jaccardSimilarity(candidateShingles, buildShingles(row.canonical_content));
-		if (similarity >= NEAR_DUPLICATE_THRESHOLD) {
+		if (similarity >= config.nearDuplicateThreshold) {
 			return {
 				isDuplicate: true,
 				reason: `near duplicate of "${row.title}"`,
@@ -675,10 +786,226 @@ async function triggerOrchestrator(env: Env, request: RunRequest): Promise<Respo
 	});
 }
 
+async function enqueueOrchestrator(env: Env, request: RunRequest): Promise<Response> {
+	const id = env.BLOG_ORCHESTRATOR.idFromName("generation-queue");
+	const stub = env.BLOG_ORCHESTRATOR.get(id);
+	return stub.fetch("https://orchestrator/enqueue", {
+		method: "POST",
+		headers: {
+			"content-type": "application/json",
+		},
+		body: JSON.stringify(request),
+	});
+}
+
 export class BlogGenerationOrchestrator extends DurableObject<Env> {
+	override async alarm(): Promise<void> {
+		const entries = await this.ctx.storage.list<unknown>({
+			prefix: "pending:",
+			limit: 1,
+		});
+		const nextEntry = entries.entries().next().value as [string, unknown] | undefined;
+		if (!nextEntry) {
+			return;
+		}
+
+		const [queueKey, rawJob] = nextEntry;
+		const job = this.coerceQueuedJob(rawJob);
+		if (!job) {
+			await this.ctx.storage.delete(queueKey);
+			const hasMore = await this.ctx.storage.list({ prefix: "pending:", limit: 1 });
+			if (hasMore.size > 0) {
+				await this.ctx.storage.setAlarm(Date.now() + 250);
+			}
+			return;
+		}
+
+		let nextJob: QueuedJob | null = null;
+		try {
+			nextJob = await this.processQueuedJob(job);
+		} catch (error) {
+			console.error("[orchestrator] queued run failed", error);
+			if (job.step !== "start") {
+				await finalizeRun(this.env.D1, job.runId, "failed", job.attempt, Date.now(), {
+					errorMessage: error instanceof Error ? error.message : "Unhandled queue processing error",
+				});
+			}
+		}
+
+		if (nextJob) {
+			await this.ctx.storage.put(queueKey, nextJob);
+		} else {
+			await this.ctx.storage.delete(queueKey);
+		}
+
+		const shouldContinue =
+			!!nextJob || (await this.ctx.storage.list({ prefix: "pending:", limit: 1 })).size > 0;
+		if (shouldContinue) {
+			await this.ctx.storage.setAlarm(Date.now() + 250);
+		}
+	}
+
+	private createQueuedJob(request: RunRequest): QueuedJob {
+		return {
+			version: 1,
+			step: "start",
+			request,
+			runId: crypto.randomUUID(),
+			dateKey: getWibDateKey(request.scheduledTime),
+			attempt: 1,
+		};
+	}
+
+	private coerceQueuedJob(raw: unknown): QueuedJob | null {
+		if (!raw || typeof raw !== "object") {
+			return null;
+		}
+
+		const candidate = raw as Partial<QueuedJob>;
+		if (
+			candidate.version === 1 &&
+			(candidate.step === "start" ||
+				candidate.step === "generate" ||
+				candidate.step === "prepare" ||
+				candidate.step === "persist") &&
+			candidate.request &&
+			typeof candidate.request.scheduledTime === "number" &&
+			(candidate.request.source === "manual" || candidate.request.source === "scheduled") &&
+			typeof candidate.runId === "string" &&
+			typeof candidate.dateKey === "string" &&
+			typeof candidate.attempt === "number"
+		) {
+			return candidate as QueuedJob;
+		}
+
+		const legacyRequest = raw as Partial<RunRequest>;
+		if (
+			typeof legacyRequest.scheduledTime === "number" &&
+			(legacyRequest.source === "manual" || legacyRequest.source === "scheduled")
+		) {
+			const normalizedRequest: RunRequest = {
+				scheduledTime: legacyRequest.scheduledTime,
+				source: legacyRequest.source,
+			};
+			if (typeof legacyRequest.cron === "string") {
+				normalizedRequest.cron = legacyRequest.cron;
+			}
+			return this.createQueuedJob(normalizedRequest);
+		}
+
+		return null;
+	}
+
+	private async handleQueuedAttemptFailure(
+		job: QueuedJob,
+		errorMessage: string,
+		config: RuntimeConfig,
+	): Promise<QueuedJob | null> {
+		const nextAttempt = job.attempt + 1;
+		if (nextAttempt > config.maxGenerationAttempts) {
+			await finalizeRun(this.env.D1, job.runId, "failed", job.attempt, Date.now(), {
+				errorMessage,
+			});
+			return null;
+		}
+
+		const { generated: _generated, draft: _draft, ...jobWithoutPayload } = job;
+
+		return {
+			...jobWithoutPayload,
+			step: "generate",
+			attempt: nextAttempt,
+			lastError: errorMessage,
+		};
+	}
+
+	private async processQueuedJob(job: QueuedJob): Promise<QueuedJob | null> {
+		const config = resolveRuntimeConfig(this.env);
+
+		if (job.step === "start") {
+			await insertRunStart(this.env.D1, job.runId, job.dateKey, job.request.source, Date.now());
+			const { generated: _generated, draft: _draft, lastError: _lastError, ...jobWithoutPayload } =
+				job;
+			return {
+				...jobWithoutPayload,
+				step: "generate",
+			};
+		}
+
+		if (job.step === "generate") {
+			try {
+				const recentRows = await getRecentTitles(this.env.D1, config.recentTitleWindow);
+				const generated = await generateArticleWithGemini(this.env, recentRows, config);
+				const { draft: _draft, ...jobWithoutDraft } = job;
+				return {
+					...jobWithoutDraft,
+					step: "prepare",
+					generated,
+				};
+			} catch (error) {
+				return this.handleQueuedAttemptFailure(
+					job,
+					error instanceof Error ? error.message : "Unknown generation error",
+					config,
+				);
+			}
+		}
+
+		if (job.step === "prepare") {
+			if (!job.generated) {
+				return this.handleQueuedAttemptFailure(job, "Missing generated payload in queue job", config);
+			}
+
+			try {
+				const draft = await preparePostDraft(
+					this.env.D1,
+					job.generated,
+					this.env.GOOGLE_MODEL_NAME ?? "",
+					Date.now(),
+					config,
+				);
+
+				const dedupeResult = await checkDuplicate(this.env.D1, draft, config);
+				if (dedupeResult.isDuplicate) {
+					return this.handleQueuedAttemptFailure(
+						job,
+						dedupeResult.reason ?? "duplicate detected",
+						config,
+					);
+				}
+
+				const { generated: _generated, ...jobWithoutGenerated } = job;
+
+				return {
+					...jobWithoutGenerated,
+					step: "persist",
+					draft,
+				};
+			} catch (error) {
+				return this.handleQueuedAttemptFailure(
+					job,
+					error instanceof Error ? error.message : "Unknown preparation error",
+					config,
+				);
+			}
+		}
+
+		if (!job.draft) {
+			return this.handleQueuedAttemptFailure(job, "Missing prepared draft in queue job", config);
+		}
+
+		await persistPost(this.env.D1, job.draft);
+		await finalizeRun(this.env.D1, job.runId, "published", job.attempt, Date.now(), {
+			postId: job.draft.id,
+			wordCount: job.draft.wordCount,
+		});
+
+		return null;
+	}
+
 	override async fetch(request: Request): Promise<Response> {
 		const url = new URL(request.url);
-		if (request.method !== "POST" || url.pathname !== "/run") {
+		if (request.method !== "POST" || !["/run", "/enqueue"].includes(url.pathname)) {
 			return responseJson({ error: "Not found" }, 404);
 		}
 
@@ -693,12 +1020,33 @@ export class BlogGenerationOrchestrator extends DurableObject<Env> {
 			return responseJson({ error: "scheduledTime and source are required" }, 400);
 		}
 
+		if (url.pathname === "/enqueue") {
+			const queueKey = `pending:${payload.source}:${payload.scheduledTime}:${crypto.randomUUID()}`;
+			const queuedJob = this.createQueuedJob(payload);
+			await this.ctx.storage.put(queueKey, queuedJob);
+			const nextAlarmAt = (await this.ctx.storage.getAlarm()) ?? 0;
+			if (nextAlarmAt <= Date.now()) {
+				await this.ctx.storage.setAlarm(Date.now() + 250);
+			}
+
+			return responseJson(
+				{
+					status: "accepted",
+					queued: true,
+					runKey: `${payload.source}:${payload.scheduledTime}`,
+					queueKey,
+				},
+				202,
+			);
+		}
+
 		const runResult = await this.runPipeline(payload);
 		const statusCode = runResult.status === "failed" ? 500 : 200;
 		return responseJson(runResult, statusCode);
 	}
 
 	private async runPipeline(request: RunRequest): Promise<RunResult> {
+		const config = resolveRuntimeConfig(this.env);
 		const dateKey = getWibDateKey(request.scheduledTime);
 		const now = Date.now();
 		const runId = crypto.randomUUID();
@@ -706,18 +1054,19 @@ export class BlogGenerationOrchestrator extends DurableObject<Env> {
 		await insertRunStart(this.env.D1, runId, dateKey, request.source, now);
 
 		let lastError = "";
-		for (let attempt = 1; attempt <= MAX_GENERATION_ATTEMPTS; attempt++) {
+		for (let attempt = 1; attempt <= config.maxGenerationAttempts; attempt++) {
 			try {
-				const recentRows = await getRecentTitles(this.env.D1, RECENT_TITLE_WINDOW);
-				const generated = await generateArticleWithGemini(this.env, recentRows);
+				const recentRows = await getRecentTitles(this.env.D1, config.recentTitleWindow);
+				const generated = await generateArticleWithGemini(this.env, recentRows, config);
 				const draft = await preparePostDraft(
 					this.env.D1,
 					generated,
 					this.env.GOOGLE_MODEL_NAME ?? "",
 					Date.now(),
+					config,
 				);
 
-				const dedupeResult = await checkDuplicate(this.env.D1, draft);
+				const dedupeResult = await checkDuplicate(this.env.D1, draft, config);
 				if (dedupeResult.isDuplicate) {
 					lastError = dedupeResult.reason ?? "duplicate detected";
 					continue;
@@ -741,13 +1090,13 @@ export class BlogGenerationOrchestrator extends DurableObject<Env> {
 			}
 		}
 
-		await finalizeRun(this.env.D1, runId, "failed", MAX_GENERATION_ATTEMPTS, Date.now(), {
+		await finalizeRun(this.env.D1, runId, "failed", config.maxGenerationAttempts, Date.now(), {
 			errorMessage: lastError || "Generation failed without error message",
 		});
 
 		return {
 			status: "failed",
-			attempt: MAX_GENERATION_ATTEMPTS,
+			attempt: config.maxGenerationAttempts,
 			reason: lastError || "Generation failed",
 		};
 	}
@@ -761,8 +1110,8 @@ const worker: ExportedHandler<WorkerEnv> = {
 			isAttemptingDevStartupGeneration = true;
 			ctx.waitUntil(
 				(async () => {
-					const success = await tryDevStartupGeneration(env);
-					hasAttemptedDevStartupGeneration = success;
+					await tryDevStartupGeneration(env);
+					hasAttemptedDevStartupGeneration = true;
 					isAttemptingDevStartupGeneration = false;
 				})(),
 			);
@@ -779,11 +1128,44 @@ const worker: ExportedHandler<WorkerEnv> = {
 				}
 			}
 
-			const response = await triggerOrchestrator(env, {
+			const config = resolveRuntimeConfig(env);
+			const waitQuery = parseBooleanEnv(url.searchParams.get("wait") ?? undefined);
+			const shouldWaitForResult = waitQuery ?? config.manualGenerateWait;
+
+			const runRequest: RunRequest = {
 				scheduledTime: Date.now(),
 				cron: "manual",
 				source: "manual",
-			});
+			};
+
+			if (!shouldWaitForResult) {
+				ctx.waitUntil(
+					(async () => {
+						try {
+							const enqueueResponse = await enqueueOrchestrator(env, runRequest);
+							const enqueueText = await enqueueResponse.text();
+							console.log(
+								`[manual-generate][enqueue] status=${enqueueResponse.status} body=${enqueueText}`,
+							);
+						} catch (error) {
+							console.error("[manual-generate][enqueue] failed", error);
+						}
+					})(),
+				);
+
+				return responseJson(
+					{
+						status: "accepted",
+						queued: true,
+						mode: "async",
+						runKey: `${runRequest.source}:${runRequest.scheduledTime}`,
+						hint: "Use /api/internal/generate-now?wait=1 for synchronous response.",
+					},
+					202,
+				);
+			}
+
+			const response = await triggerOrchestrator(env, runRequest);
 			const text = await response.text();
 			return new Response(text, {
 				headers: {
@@ -796,14 +1178,18 @@ const worker: ExportedHandler<WorkerEnv> = {
 		return handle(request, env, ctx);
 	},
 
-	async scheduled(controller, env) {
-		const response = await triggerOrchestrator(env, {
-			scheduledTime: controller.scheduledTime,
-			cron: controller.cron,
-			source: "scheduled",
-		});
-		const body = await response.text();
-		console.log(body);
+	async scheduled(controller, env, ctx) {
+		ctx.waitUntil(
+			(async () => {
+				const response = await enqueueOrchestrator(env, {
+					scheduledTime: controller.scheduledTime,
+					cron: controller.cron,
+					source: "scheduled",
+				});
+				const body = await response.text();
+				console.log(body);
+			})(),
+		);
 	},
 };
 

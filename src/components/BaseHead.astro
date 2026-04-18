@@ -84,9 +84,27 @@ const socialImageURL = new URL(ogImage ? ogImage : "/social-card.png", Astro.url
 
 <meta content={Astro.generator} name="generator" />
 
+<script is:inline>
+	window.MathJax = {
+		tex: {
+			inlineMath: [
+				["$", "$"],
+				["\\(", "\\)"],
+			],
+			displayMath: [
+				["$$", "$$"],
+				["\\[", "\\]"],
+			],
+			processEscapes: true,
+		},
+		options: {
+			skipHtmlTags: ["script", "noscript", "style", "textarea", "pre", "code"],
+		},
+	};
+</script>
 <script
 	is:inline
-	src="https://cdnjs.cloudflare.com/ajax/libs/mathjax/4.0.0/startup.js"
-	integrity="sha512-bTOpOLAF7Z74dLZ3Z3jfQE7SH0mFuuneuOQR+/3EP811prUfVzgtQLPAnIFGlAXc5fs9b1dIjfi8zd4Px1xrAQ=="
+	defer
+	src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js"
 	crossorigin="anonymous"
 	referrerpolicy="no-referrer"></script>

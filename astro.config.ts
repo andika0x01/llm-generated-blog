@@ -37,7 +37,22 @@ export default defineConfig({
       expressiveCode(expressiveCodeOptions),
       icon(),
       sitemap(),
-      mdx(),
+      mdx({
+          syntaxHighlight: false,
+          remarkPlugins: [remarkReadingTime, remarkDirective, remarkGithubCard, remarkAdmonitions],
+          rehypePlugins: [
+              rehypeHeadingIds,
+              [rehypeAutolinkHeadings, { behavior: "wrap", properties: { className: ["not-prose"] } }],
+              [
+                  rehypeExternalLinks,
+                  {
+                      rel: ["noreferrer", "noopener"],
+                      target: "_blank",
+                  },
+              ],
+              rehypeUnwrapImages,
+          ],
+      }),
       robotsTxt(),
       webmanifest({
           // See: https://github.com/alextim/astro-lib/blob/main/packages/astro-webmanifest/README.md
@@ -76,6 +91,7 @@ export default defineConfig({
 	],
 
   markdown: {
+      syntaxHighlight: false,
       rehypePlugins: [
           rehypeHeadingIds,
           [rehypeAutolinkHeadings, { behavior: "wrap", properties: { className: ["not-prose"] } }],
