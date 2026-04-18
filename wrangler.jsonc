@@ -1,0 +1,28 @@
+{
+	"compatibility_date": "2026-04-18",
+	"compatibility_flags": [
+		"nodejs_compat"
+	],
+	"name": "llm-generated-blog",
+	"main": "@astrojs/cloudflare/entrypoints/server",
+	"assets": {
+		"directory": "./dist",
+		"binding": "ASSETS"
+	},
+	"observability": {
+		"enabled": true
+	},
+	"d1_databases": [
+		{
+			"binding": "D1",
+			"database_name": "llm-generated-blog",
+			"database_id": "c076b40f-0d3b-4805-a5e4-80ba9b2c6956"
+		}
+	],
+	"kv_namespaces": [
+		{
+			"binding": "KV",
+			"id": "0b10763a8e5a486c8e06bd59c3061bde"
+		}
+	]
+}
