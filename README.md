@@ -159,6 +159,8 @@ Astro Cactus includes a helpful VSCode snippet which creates a frontmatter 'stub
 
 This integration brings a static search feature for searching blog posts and notes. In its current form, pagefind only works once the site has been built. This theme adds a postbuild script that should be run after Astro has built the site. You can preview locally by running both build && postbuild.
 
+If there are no generated `.html` files (for example, when using `output: "server"` without prerendered routes), the postbuild script will skip Pagefind instead of failing the build.
+
 Search results only includes pages from posts and notes. If you would like to include other/all your pages, remove/re-locate the attribute `data-pagefind-body` to the article tag found in `src/layouts/BlogPost.astro` and `src/components/note/Note.astro`.
 
 It also allows you to filter posts by tags added in the frontmatter of blog posts. If you would rather remove this, remove the data attribute `data-pagefind-filter="tag"` from the link in `src/components/blog/Masthead.astro`.
