@@ -1,4 +1,5 @@
 import fs from "node:fs";
+import { fileURLToPath } from "node:url";
 // Rehype plugins
 import { rehypeHeadingIds } from "@astrojs/markdown-remark";
 import mdx from "@astrojs/mdx";
@@ -21,9 +22,12 @@ import { expressiveCodeOptions, siteConfig } from "./src/site.config";
 
 import cloudflare from "@astrojs/cloudflare";
 
+const debugShimPath = fileURLToPath(new URL("./src/shims/debug.ts", import.meta.url));
+
 // https://astro.build/config
 export default defineConfig({
   site: siteConfig.url,
+  output: "server",
 
   image: {
       domains: ["webmention.io"],
@@ -93,6 +97,11 @@ export default defineConfig({
 	},
 
   vite: {
+      resolve: {
+          alias: {
+              debug: debugShimPath,
+          },
+      },
       plugins: [tailwind(), rawFonts([".ttf", ".woff"])],
 	},
 

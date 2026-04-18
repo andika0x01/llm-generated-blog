@@ -5,23 +5,26 @@ import { getFormattedDate } from "@/utils/date";
 
 export const prerender = false;
 
-// Posts
-const MAX_POSTS = 10;
 const db = getD1Binding();
-const latestPosts = db ? await listPublishedPosts(db, { limit: MAX_POSTS }) : [];
+const posts = db ? await listPublishedPosts(db) : [];
+
+const meta = {
+	description: "Read my collection of posts from D1",
+	title: "Posts",
+};
 ---
 
-<PageLayout meta={{ title: "Home" }}>
+<PageLayout meta={meta}>
 	<section>
-		<h2 class="title text-accent mb-6 text-xl"><a href="/posts/">Posts</a></h2>
+		<h1 class="title mb-12">Posts</h1>
 		{
 			!db ? (
 				<p class="text-muted">D1 binding belum tersedia di runtime ini.</p>
-			) : latestPosts.length === 0 ? (
-				<p class="text-muted">Belum ada post di database.</p>
+			) : posts.length === 0 ? (
+				<p class="text-muted">Belum ada post yang dipublikasikan.</p>
 			) : (
-				<ul class="space-y-4" role="list">
-					{latestPosts.map((post) => (
+				<ul class="space-y-4 text-start">
+					{posts.map((post) => (
 						<li class="grid gap-1 sm:grid-cols-[auto_1fr] sm:[&_q]:col-start-2">
 							<span class="text-muted min-w-30 font-semibold">
 								{getFormattedDate(new Date(post.publishAt))}

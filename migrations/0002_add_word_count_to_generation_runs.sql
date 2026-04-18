@@ -1,0 +1,1 @@
+ALTER TABLE ai_generation_runs ADD COLUMN word_count INTEGER;

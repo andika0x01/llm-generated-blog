@@ -1,0 +1,55 @@
+---
+import { getD1Binding, listPublishedPostsByTag } from "@/data/ai-post";
+import PageLayout from "@/layouts/Base.astro";
+import { getFormattedDate } from "@/utils/date";
+
+export const prerender = false;
+
+const rawTag = Astro.params.tag;
+const tag = rawTag ? decodeURIComponent(rawTag).trim().toLowerCase() : "";
+if (!tag) {
+	return new Response("Tag tidak ditemukan.", { status: 404 });
+}
+
+const db = getD1Binding();
+const posts = db ? await listPublishedPostsByTag(db, tag) : [];
+
+const meta = {
+	description: `Posts dengan tag #${tag}`,
+	title: `Tag: ${tag}`,
+};
+---
+
+<PageLayout meta={meta}>
+	<section>
+		<nav aria-label="Breadcrumb" class="mb-6">
+			<a class="cactus-link" href="/tags/">Tags</a>
+			<span class="text-muted mx-2">/</span>
+			<span>#{tag}</span>
+		</nav>
+		<h1 class="title mb-12">#{tag}</h1>
+		{
+			!db ? (
+				<p class="text-muted">D1 binding belum tersedia di runtime ini.</p>
+			) : posts.length === 0 ? (
+				<p class="text-muted">Belum ada post untuk tag ini.</p>
+			) : (
+				<ul class="space-y-4 text-start">
+					{posts.map((post) => (
+						<li class="grid gap-1 sm:grid-cols-[auto_1fr] sm:[&_q]:col-start-2">
+							<span class="text-muted min-w-30 font-semibold">
+								{getFormattedDate(new Date(post.publishAt))}
+							</span>
+							<div>
+								<a class="cactus-link" href={`/posts/${post.slug}/`}>
+									{post.title}
+								</a>
+								<q class="line-clamp-3 italic">{post.description}</q>
+							</div>
+						</li>
+					))}
+				</ul>
+			)
+		}
+	</section>
+</PageLayout>

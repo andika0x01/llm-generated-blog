@@ -3,7 +3,7 @@ import sharp from "sharp";
 import satori, { type SatoriOptions } from "satori";
 import RobotoMonoBold from "@/assets/roboto-mono-700.ttf";
 import RobotoMono from "@/assets/roboto-mono-regular.ttf";
-import { getAllPosts } from "@/data/post";
+import { getD1Binding, getPublishedPostBySlug } from "@/data/ai-post";
 import { getFormattedDate } from "@/utils/date";
 import { ogMarkup } from "./_ogMarkup";
 
@@ -27,22 +27,24 @@ const ogOptions: SatoriOptions = {
 	width: 1200,
 };
 
-export const prerender = false;
-
 export async function GET(context: APIContext) {
 	const slug = context.params.slug;
 	if (!slug) {
 		return new Response("Not found", { status: 404 });
 	}
 
-	const posts = await getAllPosts();
-	const post = posts.find((entry) => entry.id === slug);
+	const db = getD1Binding();
+	if (!db) {
+		return new Response("D1 binding unavailable", { status: 500 });
+	}
+
+	const post = await getPublishedPostBySlug(db, slug);
 	if (!post) {
 		return new Response("Not found", { status: 404 });
 	}
 
-	const pubDate = post.data.updatedDate ?? post.data.publishDate;
-	const title = post.data.title;
+	const pubDate = new Date(post.updatedAt || post.publishAt);
+	const title = post.title;
 
 	const postDate = getFormattedDate(pubDate, {
 		month: "long",

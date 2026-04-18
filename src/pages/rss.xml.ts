@@ -1,19 +1,20 @@
 import rss from "@astrojs/rss";
-import { getAllPosts } from "@/data/post";
+import { getD1Binding, listPublishedPosts } from "@/data/ai-post";
 import { siteConfig } from "@/site.config";
 
 export const GET = async () => {
-	const posts = await getAllPosts();
+	const db = getD1Binding();
+	const posts = db ? await listPublishedPosts(db, { limit: 1000 }) : [];
 
 	return rss({
 		title: siteConfig.title,
 		description: siteConfig.description,
 		site: import.meta.env.SITE,
 		items: posts.map((post) => ({
-			title: post.data.title,
-			description: post.data.description,
-			pubDate: post.data.publishDate,
-			link: `posts/${post.id}/`,
+			title: post.title,
+			description: post.description,
+			pubDate: new Date(post.publishAt),
+			link: `posts/${post.slug}/`,
 		})),
 	});
 };

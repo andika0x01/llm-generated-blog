@@ -8,7 +8,7 @@ type Props = SiteMeta;
 
 const { articleDate, description, ogImage, title } = Astro.props;
 
-const titleSeparator = "•";
+const titleSeparator = "|";
 const siteTitle = `${title} ${titleSeparator} ${siteConfig.title}`;
 const canonicalURL = new URL(Astro.url.pathname, Astro.site);
 const socialImageURL = new URL(ogImage ? ogImage : "/social-card.png", Astro.url).href;
@@ -71,7 +71,6 @@ const socialImageURL = new URL(ogImage ? ogImage : "/social-card.png", Astro.url
 
 {/* RSS auto-discovery */}
 <link href="/rss.xml" title="Blog" rel="alternate" type="application/rss+xml" />
-<link href="/notes/rss.xml" title="Notes" rel="alternate" type="application/rss+xml" />
 
 {/* Webmentions */}
 {
@@ -84,3 +83,10 @@ const socialImageURL = new URL(ogImage ? ogImage : "/social-card.png", Astro.url
 }
 
 <meta content={Astro.generator} name="generator" />
+
+<script
+	is:inline
+	src="https://cdnjs.cloudflare.com/ajax/libs/mathjax/4.0.0/startup.js"
+	integrity="sha512-bTOpOLAF7Z74dLZ3Z3jfQE7SH0mFuuneuOQR+/3EP811prUfVzgtQLPAnIFGlAXc5fs9b1dIjfi8zd4Px1xrAQ=="
+	crossorigin="anonymous"
+	referrerpolicy="no-referrer"></script>

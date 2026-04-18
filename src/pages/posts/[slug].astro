@@ -1,0 +1,70 @@
+---
+import { createMarkdownProcessor } from "@astrojs/markdown-remark";
+import TOC from "@/components/blog/TOC.astro";
+import { getD1Binding, getPublishedPostBySlug } from "@/data/ai-post";
+import PageLayout from "@/layouts/Base.astro";
+import { getFormattedDate } from "@/utils/date";
+
+export const prerender = false;
+
+const db = getD1Binding();
+if (!db) {
+	return new Response("D1 binding belum tersedia.", { status: 500 });
+}
+
+const slug = Astro.params.slug;
+if (!slug) {
+	return new Response("Slug tidak ditemukan.", { status: 404 });
+}
+
+const post = await getPublishedPostBySlug(db, slug);
+if (!post) {
+	return new Response("Post tidak ditemukan.", { status: 404 });
+}
+
+const markdown = await createMarkdownProcessor();
+const rendered = await markdown.render(post.mdxContent);
+const headings = rendered.metadata.headings;
+const publishDate = new Date(post.publishAt);
+const updatedDate = new Date(post.updatedAt);
+const articleDate = updatedDate.toISOString();
+
+const meta = {
+	articleDate,
+	description: post.description,
+	ogImage: `/og-image/${post.slug}.png`,
+	title: post.title,
+};
+---
+
+<PageLayout meta={meta}>
+	<article class="grow break-words" data-pagefind-body>
+		<header class="mb-12">
+			<h1 class="title">{post.title}</h1>
+			<p class="text-muted mt-3 font-semibold">
+				{getFormattedDate(publishDate, { month: "long" })}
+			</p>
+			{
+				post.tags.length > 0 && (
+					<div class="mt-3 flex flex-wrap gap-2">
+						{post.tags.map((tag) => (
+							<a
+								class="bg-global-text/5 hover:text-link rounded px-2 py-1 before:content-['#']"
+								href={`/tags/${tag}/`}
+							>
+								{tag}
+							</a>
+						))}
+					</div>
+				)
+			}
+		</header>
+		<div class="flex flex-col gap-10 lg:flex-row lg:items-start lg:justify-between">
+			{headings.length > 0 && <TOC headings={headings} />}
+			<div
+				class="prose prose-sm prose-headings:relative prose-headings:ps-4 prose-headings:before:absolute prose-headings:before:start-0 prose-headings:before:text-muted prose-headings:before:content-['#'] prose-headings:before:opacity-80 prose-headings:hover:before:text-accent prose-headings:font-semibold prose-headings:text-accent-2 prose-h1:text-2xl prose-h1:leading-tight prose-h2:text-xl prose-h3:text-lg prose-h4:text-base prose-th:before:content-none lg:min-w-0 lg:flex-1"
+				set:html={rendered.code}
+			/>
+		</div>
+	</article>
+</PageLayout>

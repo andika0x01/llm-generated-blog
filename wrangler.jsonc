@@ -1,10 +1,11 @@
 {
 	"compatibility_date": "2026-04-18",
-	"compatibility_flags": [
-		"nodejs_compat"
-	],
+	"compatibility_flags": ["nodejs_compat"],
 	"name": "llm-generated-blog",
-	"main": "@astrojs/cloudflare/entrypoints/server",
+	"main": "./src/worker.ts",
+	"triggers": {
+		"crons": ["0 * * * *"]
+	},
 	"assets": {
 		"directory": "./dist",
 		"binding": "ASSETS"
@@ -23,6 +24,20 @@
 		{
 			"binding": "KV",
 			"id": "0b10763a8e5a486c8e06bd59c3061bde"
+		}
+	],
+	"durable_objects": {
+		"bindings": [
+			{
+				"name": "BLOG_ORCHESTRATOR",
+				"class_name": "BlogGenerationOrchestrator"
+			}
+		]
+	},
+	"migrations": [
+		{
+			"tag": "v1",
+			"new_sqlite_classes": ["BlogGenerationOrchestrator"]
 		}
 	]
 }
